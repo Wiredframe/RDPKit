@@ -157,6 +157,42 @@ struct MockKRDPServerTests {
     #expect(report.error == nil)
 }
 
+@Test func preflightForwardsPointerUpdatesSentBeforeGraphicsChannel() throws {
+    let server = try MockKRDPServer.start(graphicsBehavior: .sendFastPathPointerUpdatesBeforeGraphicsChannel)
+    defer { server.stop() }
+
+    let observed = MockKRDPObservedEvents()
+    let report = RDPPreflightClient().run(
+        configuration: RDPConnectionConfiguration(
+            host: "127.0.0.1",
+            port: server.port,
+            credentials: RDPCredentials(username: "rdp-user", password: "secret"),
+            timeoutSeconds: 5,
+            hideCertificateWarnings: true,
+            graphicsFrameCaptureLimit: 1,
+            clipboardEnabled: false
+        ),
+        onRemotePointer: { update in
+            observed.record(update)
+        }
+    )
+
+    // The pointer cached during the handshake must still resolve from the
+    // update loop afterwards.
+    let image = RDPRemotePointerImage(
+        cacheIndex: 2,
+        hotSpot: RDPRemotePoint(x: 1, y: 3),
+        width: 1,
+        height: 1,
+        xorBitsPerPixel: 24,
+        xorMaskData: Data([0xaa, 0xbb, 0xcc, 0x00]),
+        andMaskData: Data([0xff, 0x00])
+    )
+    #expect(report.status == "success")
+    #expect(observed.pointerUpdates == [.hidden, .image(image), .cachedImage(image)])
+    #expect(report.error == nil)
+}
+
 @Test func preflightPassesKRDPServerThatRequiresBitmapCodecsCapability() throws {
     let server = try MockKRDPServer.start(requireBitmapCodecsCapability: true)
     defer { server.stop() }

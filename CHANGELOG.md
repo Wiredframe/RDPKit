@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Forward pointer updates that arrive before the RDPGFX channel opens. GNOME Remote Desktop hides the client cursor in that window when it paints the pointer into the video, so clients showed a second cursor.
+
 ## 0.3.1
 
 - Raise the minimum deployment targets from 16.0 to 17.0 for iOS, tvOS, and

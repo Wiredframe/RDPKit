@@ -4324,6 +4324,9 @@ private func performRDPGraphicsDynamicChannelHandshake(
     var dynamicChannelDecompressors: [UInt32: RDPZGFXDecompressor] = [:]
     var staticChannelReassembler = RDPStaticVirtualChannelReassembler()
     var graphicsFragment: RDPDynamicVirtualChannelFragment?
+    // Shared with the update loop so a pointer cached during the handshake
+    // still resolves when the server refers to it later.
+    let remotePointerState = RDPRemotePointerState()
 
     do {
         for _ in 0 ..< 16 {
@@ -4334,19 +4337,35 @@ private func performRDPGraphicsDynamicChannelHandshake(
                 timeoutDescription: "RDP Graphics Dynamic Channel Request"
             )
 
+            // Servers may update the pointer before the graphics channel is
+            // open; GNOME Remote Desktop hides the client cursor right then.
+            if forwardFastPathPointerUpdates(
+                in: packet,
+                remotePointerState: remotePointerState,
+                onRemotePointer: onRemotePointer
+            ) {
+                continue
+            }
+
             guard let staticPDU = try RDPStaticVirtualChannelPDU.parseIfPresent(
                 fromTPKT: packet,
                 channelID: staticChannelID,
                 maximumChunkByteCount: maximumStaticVirtualChannelChunkSize
             ) else {
-                if let shareData = try RDPShareDataPDU.parseIfPresent(fromTPKT: packet),
-                   let errorInfo = shareData.errorInfo
-                {
-                    result.remoteTermination = RDPRemoteTermination(
-                        errorInfo: errorInfo,
-                        disconnectReason: result.remoteTermination?.disconnectReason
-                    )
-                    continue
+                if let shareData = try RDPShareDataPDU.parseIfPresent(fromTPKT: packet) {
+                    if let errorInfo = shareData.errorInfo {
+                        result.remoteTermination = RDPRemoteTermination(
+                            errorInfo: errorInfo,
+                            disconnectReason: result.remoteTermination?.disconnectReason
+                        )
+                        continue
+                    }
+                    if let pointerUpdate = shareData.pointerUpdate {
+                        if let resolved = try? remotePointerState.apply(pointerUpdate) {
+                            onRemotePointer?(resolved)
+                        }
+                        continue
+                    }
                 }
                 if let shareControl = try RDPShareControlPDU.parseIfPresent(fromTPKT: packet),
                    shareControl.typeName == "server-deactivate-all"
@@ -4602,6 +4621,7 @@ private func performRDPGraphicsDynamicChannelHandshake(
                     desktopHeight: desktopHeight,
                     onGraphicsFrame: onGraphicsFrame,
                     onRemotePointer: onRemotePointer,
+                    remotePointerState: remotePointerState,
                     onDisplayControlReady: onDisplayControlReady,
                     clipboardSession: clipboardSession,
                     audioSession: audioSession,
@@ -4657,6 +4677,7 @@ private func performRDPGraphicsDynamicChannelHandshake(
                         desktopHeight: desktopHeight,
                         onGraphicsFrame: onGraphicsFrame,
                         onRemotePointer: onRemotePointer,
+                        remotePointerState: remotePointerState,
                         onDisplayControlReady: onDisplayControlReady,
                         clipboardSession: clipboardSession,
                         audioSession: audioSession,
@@ -4761,6 +4782,7 @@ private func performRDPGraphicsDynamicChannelHandshake(
                     desktopHeight: desktopHeight,
                     onGraphicsFrame: onGraphicsFrame,
                     onRemotePointer: onRemotePointer,
+                    remotePointerState: remotePointerState,
                     onDisplayControlReady: onDisplayControlReady,
                     clipboardSession: clipboardSession,
                     audioSession: audioSession,
@@ -4867,6 +4889,7 @@ private func handleInitialGraphicsPayload(
     desktopHeight: UInt16,
     onGraphicsFrame: RDPGraphicsFrameHandler?,
     onRemotePointer: RDPRemotePointerHandler?,
+    remotePointerState: RDPRemotePointerState,
     onDisplayControlReady: RDPDisplayControlSessionHandler?,
     clipboardSession: RDPClipboardSession?,
     audioSession: RDPAudioSession?,
@@ -4925,6 +4948,7 @@ private func handleInitialGraphicsPayload(
         desktopHeight: desktopHeight,
         onGraphicsFrame: onGraphicsFrame,
         onRemotePointer: onRemotePointer,
+        remotePointerState: remotePointerState,
         onDisplayControlReady: onDisplayControlReady,
         clipboardSession: clipboardSession,
         audioSession: audioSession,
@@ -5580,6 +5604,7 @@ private func receiveRDPGraphicsUpdateBatch(
     desktopHeight: UInt16,
     onGraphicsFrame: RDPGraphicsFrameHandler?,
     onRemotePointer: RDPRemotePointerHandler?,
+    remotePointerState: RDPRemotePointerState,
     onDisplayControlReady: RDPDisplayControlSessionHandler?,
     clipboardSession: RDPClipboardSession?,
     audioSession: RDPAudioSession?,
@@ -5615,7 +5640,6 @@ private func receiveRDPGraphicsUpdateBatch(
         outputHeight: desktopHeight
     )
     let primarySurfaceCompositor = RDPPrimarySurfaceCompositor(width: desktopWidth, height: desktopHeight)
-    let remotePointerState = RDPRemotePointerState()
     let targetFrameCount = frameCaptureLimit.map { max(1, $0) }
     let packetLimit = targetFrameCount.map { max(256, 256 * $0) }
 
@@ -6147,6 +6171,30 @@ private func recordFastPathOutputPacketIfPresent(
                 try sendApplicationPacket(acknowledgePacket, on: channel)
             }
         }
+    }
+    return true
+}
+
+/// Forwards the pointer updates in a fast-path output packet and drops its
+/// other updates. Returns `false` when the packet is not fast-path output,
+/// so the caller can try the slow-path parsers instead.
+private func forwardFastPathPointerUpdates(
+    in packet: Data,
+    remotePointerState: RDPRemotePointerState,
+    onRemotePointer: RDPRemotePointerHandler?
+) -> Bool {
+    guard packet.first != TPKT.version,
+          let fastPath = try? RDPFastPathOutputPDU.parse(packet)
+    else {
+        return false
+    }
+    for update in fastPath.updates {
+        guard let pointerUpdate = update.pointerUpdate,
+              let resolvedPointerUpdate = try? remotePointerState.apply(pointerUpdate)
+        else {
+            continue
+        }
+        onRemotePointer?(resolvedPointerUpdate)
     }
     return true
 }

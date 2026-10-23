@@ -117,6 +117,7 @@ enum MockKRDPSecurityProtocol {
 enum MockKRDPGraphicsBehavior: Equatable {
     case sendFirstFrame
     case sendPointerUpdatesBeforeFirstFrame
+    case sendFastPathPointerUpdatesBeforeGraphicsChannel
     case sendCompressedCapsConfirmFirstFrame
     case sendFragmentedCompressedCapsConfirmFirstFrame
     case stallAfterFragmentedCapsConfirm
@@ -1398,6 +1399,10 @@ private final class MockKRDPServerHandler: ChannelInboundHandler {
                     writePacket(createPacket, context: context)
                 }
             } else {
+                if graphicsBehavior == .sendFastPathPointerUpdatesBeforeGraphicsChannel {
+                    writePacket(MockKRDPFixtures.fastPathHiddenPointerUpdate(), context: context)
+                    writePacket(MockKRDPFixtures.fastPathColorPointerUpdate(), context: context)
+                }
                 writePacket(MockKRDPFixtures.graphicsCreateRequest(), context: context)
             }
             stage = .graphicsCreateResponse(auxiliaryDynamicChannelBehavior.createRequests.count + 1)
@@ -1499,6 +1504,7 @@ private final class MockKRDPServerHandler: ChannelInboundHandler {
             switch graphicsBehavior {
             case .sendFirstFrame,
                  .sendPointerUpdatesBeforeFirstFrame,
+                 .sendFastPathPointerUpdatesBeforeGraphicsChannel,
                  .sendCompressedCapsConfirmFirstFrame,
                  .sendFragmentedCompressedCapsConfirmFirstFrame,
                  .sendFragmentedBitmapCompositionFrame,
@@ -2379,6 +2385,33 @@ private enum MockKRDPFixtures {
         return shareDataPacket(pduType2: 0x1B, payload: payload)
     }
 
+    static func fastPathHiddenPointerUpdate() -> Data {
+        fastPathOutputPacket(updateCode: 0x5, updateData: Data())
+    }
+
+    static func fastPathColorPointerUpdate() -> Data {
+        var updateData = Data()
+        updateData.appendLittleEndianUInt16(2)
+        updateData.appendLittleEndianUInt16(1)
+        updateData.appendLittleEndianUInt16(3)
+        updateData.appendLittleEndianUInt16(1)
+        updateData.appendLittleEndianUInt16(1)
+        updateData.appendLittleEndianUInt16(2)
+        updateData.appendLittleEndianUInt16(4)
+        updateData.append(Data([0xaa, 0xbb, 0xcc, 0x00]))
+        updateData.append(Data([0xff, 0x00]))
+        return fastPathOutputPacket(updateCode: 0x9, updateData: updateData)
+    }
+
+    /// One unfragmented, uncompressed update in a fast-path output PDU.
+    static func fastPathOutputPacket(updateCode: UInt8, updateData: Data) -> Data {
+        var update = Data([updateCode])
+        update.appendLittleEndianUInt16(UInt16(updateData.count))
+        update.append(updateData)
+        precondition(update.count + 2 < 0x80, "two-byte length form not needed by the fixtures")
+        return Data([0x00, UInt8(update.count + 2)]) + update
+    }
+
     static func cachedPointerUpdate() -> Data {
         var payload = Data()
         payload.appendLittleEndianUInt16(0x0007)
@@ -2632,6 +2665,8 @@ private enum MockKRDPFixtures {
             [graphicsDynamicPacket(avc420FrameMessages())]
         case .sendPointerUpdatesBeforeFirstFrame:
             [pointerColorUpdate(), cachedPointerUpdate(), graphicsDynamicPacket(avc420FrameMessages())]
+        case .sendFastPathPointerUpdatesBeforeGraphicsChannel:
+            [cachedPointerUpdate(), graphicsDynamicPacket(avc420FrameMessages())]
         case .setErrorInfoLogoffBeforeFrame:
             [
                 setErrorInfo(0x0000_000C),
